@@ -1,0 +1,18 @@
+[xlink-net-1.0]
+samplerate=96000
+name=name
+framelen=32 # bytes
+[0-3] # little endian
+name=channel 0
+encoding=signed|unsigned|float
+mq=voltage|current|duty
+scale=1.0
+[7-4] # big endian
+name=channel 1
+encoding=signed|unsigned|float
+mq=voltage|current|duty
+scale=1.0
+[8.0] # logic channel
+name=logic channel 0
+[8.1] # logic channel
+name=logic channel 1

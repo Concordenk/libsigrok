@@ -662,6 +662,12 @@ src_libdrivers_la_SOURCES += \
 	src/hardware/uni-t-ut32x/protocol.c \
 	src/hardware/uni-t-ut32x/api.c
 endif
+if HW_XLINK_NET
+src_libdrivers_la_SOURCES += \
+	src/hardware/xlink-net/protocol.h \
+	src/hardware/xlink-net/protocol.c \
+	src/hardware/xlink-net/api.c
+endif
 if HW_YOKOGAWA_DLM
 src_libdrivers_la_SOURCES += \
 	src/hardware/yokogawa-dlm/protocol.h \
