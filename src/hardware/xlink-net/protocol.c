@@ -39,8 +39,16 @@
 
 #define	MAX_DESCRIPTION_SIZE	1024
 #define	CONVERSION_BUFF_SIZE	1024
+#define  WAIT_TIME				2000000 /* 2 seconds */
 
 static struct dev_info* xlink_net_parse_info(const char *data, int len);
+
+static uint64_t xlink_time(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+}
 
 static void xlink_extract_analog(const struct dev_channel* ch, unsigned framelen, float* outbuff, const char* src, unsigned proceed)
 {
@@ -249,6 +257,7 @@ SR_PRIV int xlink_net_start(struct dev_context *devc)
 	int fd, len;
 	char* end;
 	struct dev_info* di;
+	uint64_t from;
 
 	if(devc->socket >= 0)
 		xlink_net_stop(devc);
@@ -257,17 +266,38 @@ SR_PRIV int xlink_net_start(struct dev_context *devc)
 	fd = socket(devc->di->addr->ai_family, devc->di->addr->ai_socktype, devc->di->addr->ai_protocol);
 	if(fd < 0)
 		return SR_ERR;
-	if(connect(fd, devc->di->addr->ai_addr, devc->di->addr->ai_addrlen) != 0)
-		goto on_err;
+	for(from = xlink_time() ; ;)
+	{
+		if(!connect(fd, devc->di->addr->ai_addr, devc->di->addr->ai_addrlen))
+			break;
+		if(errno != ECONNREFUSED)
+			goto on_err;
+		if((int64_t)(xlink_time() - from) > WAIT_TIME)
+		{
+			sr_err("timeout waiting for connecting");
+			goto on_err;
+		}
+		usleep(10000); /* 10ms */
+	}
 	/* Read-out header */
 	devc->buffer_size = 0;
-	if((len = read(fd, devc->buffer, MAX_DESCRIPTION_SIZE)) <= 0)
-		goto on_err;
-	if((end = memchr(devc->buffer, 0, len)) == NULL)
-		goto on_err;
+	for(from = xlink_time() ; ;)
+	{
+		if((len = read(fd, &devc->buffer[devc->buffer_size], MAX_DESCRIPTION_SIZE - devc->buffer_size)) <= 0)
+			goto on_err;
+		devc->buffer_size += len;
+		if((end = memchr(devc->buffer, 0, devc->buffer_size)) != NULL)
+			break;
+		if((int64_t)(xlink_time() - from) > WAIT_TIME)
+		{
+			sr_err("timeout waiting for connecting");
+			goto on_err;
+		}
+		usleep(10000); /* 10ms */
+	}
 	if((di = xlink_net_parse_info(devc->buffer, end - devc->buffer)) == NULL)
 		goto on_err;
-	devc->buffer_size = len - (end - devc->buffer + 1);
+	devc->buffer_size = devc->buffer_size - (end - devc->buffer + 1);
 	memmove(devc->buffer, end + 1, devc->buffer_size);
 	devc->socket = fd;
 	devc->recv_samples = 0;
@@ -494,9 +524,10 @@ SR_PRIV struct dev_info* xlink_net_load_info(const char* addr, const char* port)
 	{
 		struct addrinfo hints = {};
 		struct addrinfo *results, *res;
-		int err, fd, len;
+		int err, fd, len, off;
 		char buff[MAX_DESCRIPTION_SIZE];
 		char* end;
+		uint64_t from;
 
 		hints.ai_family = AF_UNSPEC;
 		hints.ai_socktype = SOCK_STREAM;
@@ -515,10 +546,13 @@ SR_PRIV struct dev_info* xlink_net_load_info(const char* addr, const char* port)
 			if(connect(fd, res->ai_addr, res->ai_addrlen) == 0)
 			{
 				sr_info("Connected to %s:%s", addr, port);
-				if((len = read(fd, buff, sizeof(buff))) > 0)
+				off = 0;
+				for(from = xlink_time() ; ;)
 				{
-					sr_info("Read %d bytes", len);
-					if((end = memchr(buff, 0, len)) != NULL)
+					if((len = read(fd, &buff[off], MAX_DESCRIPTION_SIZE - off)) <= 0)
+						break;
+					off += len;
+					if((end = memchr(buff, 0, off)) != NULL)
 					{
 						len = end - buff;
 						sr_info("Header found, %d size", len);
@@ -530,6 +564,9 @@ SR_PRIV struct dev_info* xlink_net_load_info(const char* addr, const char* port)
 							return di;
 						}
 					}
+					if((int64_t)(xlink_time() - from) > WAIT_TIME)
+						break;
+					usleep(10000); /* 10ms */
 				}
 			}
 			close(fd);
