@@ -33,41 +33,51 @@ struct addrinfo;
 
 struct dev_channel
 {
-	unsigned					isbigendian : 1;
-	unsigned					isunsigned  : 1;
-	unsigned					isfloat     : 1;
-	enum sr_mq				mq;
-	enum sr_unit			unit;
-	struct sr_channel*	channel;
-	unsigned					frameoffset;
-	unsigned					bits;
-	float						scale;
-	char*						name;
-	struct dev_channel*	next;
+	unsigned							isbigendian : 1;
+	unsigned							isunsigned  : 1;
+	unsigned							isfloat     : 1;
+	unsigned							isarmfloat  : 1;
+	unsigned							lastone     : 1;
+	unsigned							haslast     : 1;
+	enum sr_mq						mq;
+	enum sr_unit					unit;
+	struct sr_channel*			channel;
+	unsigned							frameoffset;
+	unsigned							bits;
+	unsigned							trigger;
+	float								scale;
+	float								trigval;
+	char*								name;
+	struct dev_channel*			next;
 };
 
 struct dev_info
 {
-	unsigned					framelen;
-	uint64_t					sr;
-	char*						name;
-	struct dev_channel*	analog;
-	struct dev_channel*	digital;
-	struct addrinfo*		addr;
-	struct addrinfo*		addresses;
+	unsigned							framelen;
+	uint64_t							sr;
+	char*								name;
+	struct dev_channel*			analog;
+	struct dev_channel*			digital;
+	struct addrinfo*				addr;
+	struct addrinfo*				addresses;
 };
 
 /** Private, per-device-instance driver context. */
 struct dev_context
 {
-	struct dev_info*		di;
-	char*						buffer;
-	unsigned					buffer_maxsize;
-	unsigned					buffer_size;
-	uint64_t					limit_samples;
-	uint64_t					recv_samples;
-	GPollFD					pollfd;
-	int						socket;
+	struct dev_info*				di;
+	char*								buffer;
+	unsigned							buffer_maxsize;
+	unsigned							buffer_size;
+	uint64_t							limit_samples;
+	uint64_t							recv_samples;
+	unsigned							trigger_delay;
+	unsigned							trigger_holdoff;
+	const struct dev_channel*	trigger_source;
+	enum sr_trigger_matches		trigger_slope;
+	float								trigger_level;
+	GPollFD							pollfd;
+	int								socket;
 };
 
 SR_PRIV int xlink_net_receive_data(int fd, int revents, void *cb_data);

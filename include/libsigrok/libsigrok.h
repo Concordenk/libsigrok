@@ -1085,6 +1085,13 @@ enum sr_configkey {
 
 	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
 
+	/*--- Trigger configuration -----------------------*/
+
+	/** Holdoff time for soft-trigger module */
+	SR_CONF_HOLDOFF = 35000,
+
+	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
+
 	/*--- Special stuff -------------------------------------------------*/
 
 	/** Session filename. */

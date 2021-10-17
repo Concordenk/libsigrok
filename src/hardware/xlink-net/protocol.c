@@ -56,58 +56,64 @@ static void xlink_extract_analog(const struct dev_channel* ch, unsigned framelen
 	unsigned			j, shift;
 	const float		scale = ch->scale;
 	const uint8_t*	s = (const void *)&src[ch->frameoffset];
+	const int		be = ch->isbigendian;
 
 	if(ch->isfloat)
 	{
-		union { float f; int32_t i; } uf;
-		union { double d; int64_t i; } ud;
-		if(ch->bits == (sizeof(float) * 8))
+		const int af = ch->isarmfloat;
+		union { float f; uint32_t u; } uf;
+		union { double d; uint64_t u; } ud;
+		unsigned u16, fsign, fmantissa, fexp, clz;
+		switch(ch->bits)
 		{
-			if(ch->isbigendian)
+		case sizeof(uint16_t) * 8:
+			for(j = 0 ; j < proceed ; ++j, s += framelen)
 			{
-				for(j = 0 ; j < proceed ; ++j, s += framelen)
-				{
-					uf.i       = GUINT32_FROM_BE(*(const int32_t *)s);
-					outbuff[j] = uf.f * scale;
+				u16 = be ? GUINT32_FROM_BE(*(const int32_t *)s) : GUINT32_FROM_LE(*(const int32_t *)s);
+				fsign = u16 >> 15;
+				fmantissa = u16 & 0x3FF;
+				fexp = (u16 >> 10) & 0x1F;
+				uf.u = fsign << 31;
+				if(!fexp)
+				{	// zero, -zero, subnormal
+					if(fmantissa)
+					{	// subnormal, convert to normalized
+						clz = __builtin_clz(fmantissa) - 21;
+						fmantissa = (fmantissa << clz) & 0x3FF;
+						fexp = (127 - 14) - clz;
+						uf.u |= (fexp << 23) | (fmantissa << 13);
+					}
+				} else if(!af && (fexp == 31))
+				{	// nan, inf and not armfloat
+					uf.u |= (0xFF << 23) | (fmantissa << 13);
+				} else
+				{	// normalized
+					fexp += 127 - 15;
+					uf.u |= (fexp << 23) | (fmantissa << 13);
 				}
-			} else
-			{
-				for(j = 0 ; j < proceed ; ++j, s += framelen)
-				{
-					uf.i       = GUINT32_FROM_LE(*(const int32_t *)s);
-					outbuff[j] = uf.f * scale;
-				}
+				outbuff[j] = uf.f * scale;
 			}
-		} else if(ch->bits == (sizeof(double) * 8))
-		{
-			if(ch->isbigendian)
+			break;
+		case sizeof(float) * 8:
+			for(j = 0 ; j < proceed ; ++j, s += framelen)
 			{
-				for(j = 0 ; j < proceed ; ++j, s += framelen)
-				{
-					ud.i       = GUINT64_FROM_BE(*(const int64_t *)s);
-					outbuff[j] = ud.d * scale;
-				}
-			} else
-			{
-				for(j = 0 ; j < proceed ; ++j, s += framelen)
-				{
-					ud.i       = GUINT64_FROM_LE(*(const int64_t *)s);
-					outbuff[j] = ud.d * scale;
-				}
+				uf.u       = be ? GUINT32_FROM_BE(*(const int32_t *)s) : GUINT32_FROM_LE(*(const int32_t *)s);
+				outbuff[j] = uf.f * scale;
 			}
+			break;
+		case sizeof(double) * 8:
+			for(j = 0 ; j < proceed ; ++j, s += framelen)
+			{
+				ud.u       = be ? GUINT64_FROM_BE(*(const int64_t *)s) : GUINT64_FROM_LE(*(const int64_t *)s);
+				outbuff[j] = ud.d * scale;
+			}
+			break;
 		}
 	} else if(ch->bits <= 64)
 	{
 		shift = 64 - ch->bits;
-		if(ch->isbigendian)
-		{
-			for(j = 0 ; j < proceed ; ++j, s += framelen)
-				buf64[j] = GUINT64_FROM_BE(*(const uint64_t *)s);
-		} else
-		{
-			for(j = 0 ; j < proceed ; ++j, s += framelen)
-				buf64[j] = GUINT64_FROM_LE(*(const uint64_t *)s) << shift;
-		}
+		for(j = 0 ; j < proceed ; ++j, s += framelen)
+			buf64[j] = be ? GUINT64_FROM_BE(*(const uint64_t *)s) : (GUINT64_FROM_LE(*(const uint64_t *)s) << shift);
 		if(ch->isunsigned)
 		{
 			for(j = 0 ; j < proceed ; ++j)
@@ -134,6 +140,81 @@ static void xlink_extract_digital(const struct dev_channel* ch, unsigned framele
 	}
 }
 
+static unsigned xlink_digital_trigger(struct dev_channel* ch, const uint32_t* buff, int trig_delay, unsigned proceed)
+{
+	unsigned haslast = ch->haslast, lastone = ch->lastone;
+	unsigned i, bit, ok;
+
+	for(i = 0 ; i < proceed ; ++i, --trig_delay)
+	{
+		bit = (buff[i] != 0);
+		ok = 0;
+		switch(ch->trigger)
+		{
+		case SR_TRIGGER_ZERO:
+			ok = !bit;
+			break;
+		case SR_TRIGGER_ONE:
+			ok = bit;
+			break;
+		case SR_TRIGGER_RISING:
+			ok = haslast && !lastone && bit;
+			break;
+		case SR_TRIGGER_FALLING:
+			ok = haslast && lastone && !bit;
+			break;
+		case SR_TRIGGER_EDGE:
+			ok = haslast && (lastone != bit);
+			break;
+		}
+		haslast = 1;
+		lastone = bit;
+		if(ok && (trig_delay <= 0))
+			break;
+	}
+	ch->haslast = haslast;
+	ch->lastone = lastone;
+	return i;
+}
+
+static unsigned xlink_analog_trigger(struct dev_channel* ch, const float* buff, int trig_delay, unsigned proceed)
+{
+	const float trigval = ch->trigval;
+	unsigned haslast = ch->haslast, lastone = ch->lastone;
+	unsigned i, bit, ok;
+
+	for(i = 0 ; i < proceed ; ++i, --trig_delay)
+	{
+		bit = (buff[i] >= trigval);
+		ok = 0;
+		switch(ch->trigger)
+		{
+		case SR_TRIGGER_RISING:
+			ok = haslast && !lastone && bit;
+			break;
+		case SR_TRIGGER_FALLING:
+			ok = haslast && lastone && !bit;
+			break;
+		case SR_TRIGGER_EDGE:
+			ok = haslast && (lastone != bit);
+			break;
+		case SR_TRIGGER_UNDER:
+			ok = !bit;
+			break;
+		case SR_TRIGGER_OVER:
+			ok = bit;
+			break;
+		}
+		haslast = 1;
+		lastone = bit;
+		if(ok && (trig_delay <= 0))
+			break;
+	}
+	ch->haslast = haslast;
+	ch->lastone = lastone;
+	return i;
+}
+
 SR_PRIV int xlink_net_receive_data(int fd, int revents, void *cb_data)
 {
 	const struct sr_dev_inst*	sdi;
@@ -144,7 +225,7 @@ SR_PRIV int xlink_net_receive_data(int fd, int revents, void *cb_data)
 	if(revents == G_IO_IN)
 	{
 		const struct dev_info*     di = devc->di;
-		const struct dev_channel*  ch;
+		struct dev_channel*  		ch;
 		struct sr_datafeed_packet 	packet;
 		struct sr_datafeed_analog	analog;
 		struct sr_datafeed_logic 	logic;
@@ -152,7 +233,7 @@ SR_PRIV int xlink_net_receive_data(int fd, int revents, void *cb_data)
 		struct sr_analog_meaning	meaning;
 		struct sr_analog_spec		spec;
 		int								len, logics, trigger;
-		unsigned							samples, proceed, framelen;
+		unsigned							samples, proceed, framelen, triggered;
 		const char*						src;
 		union
 		{
@@ -180,10 +261,41 @@ SR_PRIV int xlink_net_receive_data(int fd, int revents, void *cb_data)
 		framelen = di->framelen;
 		samples = devc->buffer_size / framelen;
 		src = devc->buffer;
-		while(samples)
+		while(samples && !trigger)
 		{
 			proceed = MIN(CONVERSION_BUFF_SIZE, samples);
 			proceed = MIN(devc->limit_samples - devc->recv_samples, proceed);
+			if(!proceed)
+				break;
+			/* proceed triggers */
+			for(ch = di->digital ; ch && proceed ; ch = ch->next)
+			{
+				if(ch->channel && ch->channel->enabled && ch->trigger)
+				{
+					memset(&buf, 0, sizeof(buf));
+					xlink_extract_digital(ch, framelen, buf.u32, src, proceed);
+					triggered = xlink_digital_trigger(ch, buf.u32, devc->trigger_delay, proceed);
+					if(triggered != proceed)
+					{	/* trigger found */
+						proceed = triggered;
+						trigger = 1;
+					}
+				}
+			}
+			for(ch = di->analog ; ch && proceed ; ch = ch->next)
+			{
+				if(ch->channel && ch->channel->enabled && ch->trigger)
+				{
+					memset(&buf, 0, sizeof(buf));
+					xlink_extract_analog(ch, framelen, buf.f, src, proceed);
+					triggered = xlink_analog_trigger(ch, buf.f, devc->trigger_delay, proceed);
+					if(triggered != proceed)
+					{	/* trigger found */
+						proceed = triggered;
+						trigger = 1;
+					}
+				}
+			}
 			if(!proceed)
 				break;
 			/* push digital data */
@@ -223,13 +335,6 @@ SR_PRIV int xlink_net_receive_data(int fd, int revents, void *cb_data)
 				sr_session_send(sdi, &packet);
 				g_slist_free(analog.meaning->channels);
 			}
-			if(1)
-			{
-				uint64_t pid = devc->recv_samples / 10000;
-				uint64_t nid = (devc->recv_samples + proceed) / 10000;
-				if(pid != nid)
-					trigger = 1;
-			}
 			samples -= proceed;
 			src += proceed * framelen;
 			devc->recv_samples += proceed;
@@ -237,10 +342,16 @@ SR_PRIV int xlink_net_receive_data(int fd, int revents, void *cb_data)
 		proceed = (devc->buffer_size / framelen) - samples;
 		devc->buffer_size -= proceed * framelen;
 		memmove(devc->buffer, devc->buffer + (proceed * framelen), devc->buffer_size);
+		if(trigger)
+		{	/* send trigger */
+			devc->trigger_delay = devc->trigger_holdoff;
+			std_session_send_df_trigger(sdi);
+		} else
+		{	/* decrement trigger delay */
+			devc->trigger_delay -= MIN(devc->trigger_delay, proceed);
+		}
 		if(devc->recv_samples >= devc->limit_samples)
 			goto do_stop;
-		if(trigger)
-			std_session_send_df_trigger(sdi);
 	}
 	if(devc->recv_samples >= devc->limit_samples)
 	{	/* completed - Send EOA Packet, stop polling */
@@ -257,6 +368,7 @@ SR_PRIV int xlink_net_start(struct dev_context *devc)
 	int fd, len;
 	char* end;
 	struct dev_info* di;
+	struct dev_channel* ch;
 	uint64_t from;
 
 	if(devc->socket >= 0)
@@ -297,11 +409,16 @@ SR_PRIV int xlink_net_start(struct dev_context *devc)
 	}
 	if((di = xlink_net_parse_info(devc->buffer, end - devc->buffer)) == NULL)
 		goto on_err;
+	xlink_net_free_info(di);
 	devc->buffer_size = devc->buffer_size - (end - devc->buffer + 1);
 	memmove(devc->buffer, end + 1, devc->buffer_size);
 	devc->socket = fd;
 	devc->recv_samples = 0;
-	xlink_net_free_info(di);
+	devc->trigger_delay = 0;
+	for(ch = devc->di->analog ; ch ; ch = ch->next)
+		ch->haslast = 0;
+	for(ch = devc->di->digital ; ch ; ch = ch->next)
+		ch->haslast = 0;
 	return SR_OK;
 on_err:
 	close(fd);
@@ -354,6 +471,7 @@ static struct dev_info* xlink_net_parse_info(const char* buf, int len)
 	struct dev_channel* ch;
 	struct dev_channel* lastanalog;
 	struct dev_channel* lastdigital;
+	const struct dev_channel* test;
 	unsigned digitals;
 	const char* dsc;
 	unsigned i, from, to, bit;
@@ -394,19 +512,31 @@ static struct dev_info* xlink_net_parse_info(const char* buf, int len)
 			continue;
 		ch = g_new0(struct dev_channel, 1);
 		ch->name = g_key_file_get_string(kf, dsc, "name", NULL);
+		ch->scale = 1;
 		if(!ch->name)
 			ch->name = g_strdup(dsc);
 		if(sscanf(dsc, "%d-%d%c", &from, &to, &cend) == 2)
 		{	/* analog channel */
 			sr_info("Found analog channel: %d, %s", i, ch->name);
+			for(test = di->analog ; test ; test = test->next)
+			{
+				if(!strcmp(test->name, ch->name))
+				{
+					sr_err("duplicate channel name: %s", ch->name);
+					goto on_err;
+				}
+			}
 			if((from >= di->framelen) || (to >= di->framelen) || (from == to))
 			{
 				sr_err("invalid analog descriptor: %s", dsc);
 				goto on_err;
 			}
-			ch->scale = g_key_file_get_double(kf, dsc, "scale", &gerr);
-			if(gerr)
-				goto on_err;
+			if(g_key_file_has_key(kf, dsc, "scale", NULL))
+			{
+				ch->scale = g_key_file_get_double(kf, dsc, "scale", &gerr);
+				if(gerr)
+					goto on_err;
+			}
 			txt = g_key_file_get_string(kf, dsc, "mq", &gerr);
 			if(gerr)
 				goto on_err;
@@ -438,6 +568,8 @@ static struct dev_info* xlink_net_parse_info(const char* buf, int len)
 				ch->isunsigned = 1;
 			else if(!strcmp(txt, "float"))
 				ch->isfloat = 1;
+			else if(!strcmp(txt, "armfloat"))
+				ch->isfloat = ch->isarmfloat = 1;
 			else
 			{
 				sr_err("invalid encoding: %s", txt);

@@ -28,6 +28,7 @@ static const uint32_t scanopts[] = {
 
 static const uint32_t drvopts[] = {
 	SR_CONF_OSCILLOSCOPE,
+	SR_CONF_LOGIC_ANALYZER
 };
 
 static const uint32_t devopts[] = {
@@ -35,6 +36,10 @@ static const uint32_t devopts[] = {
 	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_SAMPLERATE | SR_CONF_GET,
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
+	SR_CONF_HOLDOFF | SR_CONF_GET | SR_CONF_SET,
+	/*SR_CONF_TRIGGER_SOURCE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_SLOPE |  SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_LEVEL | SR_CONF_GET | SR_CONF_SET,*/
 };
 
 static const int32_t trigger_matches[] = {
@@ -43,6 +48,16 @@ static const int32_t trigger_matches[] = {
 	SR_TRIGGER_RISING,
 	SR_TRIGGER_FALLING,
 	SR_TRIGGER_EDGE,
+	SR_TRIGGER_OVER,
+	SR_TRIGGER_UNDER
+};
+
+static const char *trigger_slopes[] = {
+	"r", "f",
+};
+
+static enum sr_trigger_matches trigger_slope_matches[] = {
+	SR_TRIGGER_RISING, SR_TRIGGER_FALLING,
 };
 
 static GSList *scan(struct sr_dev_driver *di, GSList *options)
@@ -91,6 +106,8 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->socket			= -1;
 	devc->limit_samples	= 10000000;
 	devc->buffer_maxsize	= 128 * 1024;
+	devc->trigger_holdoff = 64;
+	devc->trigger_slope  = SR_TRIGGER_RISING;
 	devc->di					= xlink_net_load_info(params[1], params[2]);
 	if(devc->di)
 		sr_info("xlink-net device found at %s : %s", params[1], params[2]);
@@ -132,15 +149,48 @@ static int config_get(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc = sdi->priv;
+	unsigned i;
 
 	(void)cg;
 
 	switch (key) {
 	case SR_CONF_LIMIT_SAMPLES:
+		if(!devc)
+			return SR_ERR_ARG;
 		*data = g_variant_new_uint64(devc->limit_samples);
 		break;
 	case SR_CONF_SAMPLERATE:
+		if(!devc)
+			return SR_ERR_ARG;
 		*data = g_variant_new_uint64(devc->di->sr);
+		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		if(!devc)
+			return SR_ERR_ARG;
+		*data = g_variant_new_string(devc->trigger_source ? devc->trigger_source->name : "");
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		if(!devc)
+			return SR_ERR_ARG;
+		for(i = 0 ; i < ARRAY_SIZE(trigger_slopes) ; ++i)
+		{
+			if(devc->trigger_slope == trigger_slope_matches[i])
+			{
+				*data = g_variant_new_string(trigger_slopes[i]);
+				return SR_OK;
+			}
+		}
+		*data = g_variant_new_string("");
+		break;
+	case SR_CONF_TRIGGER_LEVEL:
+		if(!devc)
+			return SR_ERR_ARG;
+		*data = g_variant_new_double(devc->trigger_level);
+		break;
+	case SR_CONF_HOLDOFF:
+		if(!devc)
+			return SR_ERR_ARG;
+		*data = g_variant_new_uint64(devc->trigger_holdoff);
 		break;
 	default:
 		return SR_ERR_NA;
@@ -164,12 +214,57 @@ static int config_set(uint32_t key, GVariant *data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc = sdi->priv;
+	struct dev_channel* ch;
+	const char* str;
+	unsigned i;
 
 	(void)cg;
 
 	switch (key) {
 	case SR_CONF_LIMIT_SAMPLES:
+		if(!devc)
+			return SR_ERR_ARG;
 		devc->limit_samples = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		if(!devc)
+			return SR_ERR_ARG;
+		devc->trigger_source = NULL;
+		if((str = g_variant_get_string(data, NULL)) != NULL)
+		{
+			for(ch = devc->di->analog ; ch ; ch = ch->next)
+			{
+				if(!strcmp(ch->name, str))
+				{
+					devc->trigger_source = ch;
+					return SR_OK;
+				}
+			}
+			return SR_ERR_ARG;
+		}
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		str = g_variant_get_string(data, NULL);
+		if(!devc || !str)
+			return SR_ERR_ARG;
+		for(i = 0 ; i < ARRAY_SIZE(trigger_slopes) ; ++i)
+		{
+			if(!strcmp(str, trigger_slopes[i]))
+			{
+				devc->trigger_slope = trigger_slope_matches[i];
+				return SR_OK;
+			}
+		}
+		return SR_ERR_ARG;
+	case SR_CONF_TRIGGER_LEVEL:
+		if(!devc)
+			return SR_ERR_ARG;
+		devc->trigger_level = g_variant_get_double(data);
+		break;
+	case SR_CONF_HOLDOFF:
+		if(!devc)
+			return SR_ERR_ARG;
+		devc->trigger_holdoff = g_variant_get_uint64(data);
 		break;
 	default:
 		return SR_ERR_NA;
@@ -182,15 +277,33 @@ static int config_list(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc = sdi->priv;
+	const struct dev_channel* ch;
+	const char** str;
+	unsigned len;
 	switch (key) {
 	case SR_CONF_SCAN_OPTIONS:
 	case SR_CONF_DEVICE_OPTIONS:
 		return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
 	case SR_CONF_SAMPLERATE:
+		if(!devc)
+			return SR_ERR_ARG;
 		*data = std_gvar_samplerates(&devc->di->sr, 1);
 		break;
 	case SR_CONF_TRIGGER_MATCH:
 		*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
+		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		if(!devc)
+			return SR_ERR_ARG;
+		for(ch = devc->di->analog, len = 0 ; ch ; ch = ch->next, ++len);
+		str = g_new0(const char *, len + 1);
+		for(ch = devc->di->analog, len = 0 ; ch ; ch = ch->next, ++len)
+			str[len] = ch->name;
+		*data = g_variant_new_strv(str, len);
+		g_free(str);
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(trigger_slopes));
 		break;
 	default:
 		return SR_ERR_NA;
@@ -198,10 +311,38 @@ static int config_list(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
+static void dev_set_trigger(struct dev_channel* ch, const struct sr_trigger* trigger)
+{
+	ch->trigger = 0;
+	if(trigger && trigger->stages)
+	{	/* only one stage supported */
+		const struct sr_trigger_stage* stage = trigger->stages->data;
+		GSList* l = stage->matches;
+		for(; l ; l = l->next)
+		{
+			const struct sr_trigger_match* match = l->data;
+			if(match->channel == ch->channel)
+			{
+				ch->trigger = match->match;
+				ch->trigval = match->value;
+			}
+		}
+	}
+}
+
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc = sdi->priv;
+	struct dev_channel *ch;
+	const struct sr_trigger *trigger;
 	int err;
+
+	trigger = sr_session_trigger_get(sdi->session);
+	/* set triggers */
+	for(ch = devc->di->analog ; ch ; ch = ch->next)
+		dev_set_trigger(ch, trigger);
+	for(ch = devc->di->digital ; ch ; ch = ch->next)
+		dev_set_trigger(ch, trigger);
 
 	std_session_send_df_header(sdi);
 	/* Trigger and add poll on file */

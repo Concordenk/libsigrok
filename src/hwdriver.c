@@ -212,7 +212,9 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Power Target", NULL},
 	{SR_CONF_RESISTANCE_TARGET, SR_T_FLOAT, "resistance_target",
 		"Resistance Target", NULL},
-
+	/* Trigger stuff */
+	{SR_CONF_HOLDOFF, SR_T_UINT64, "holdoff_samples",
+		"Repeat trigger holdoff samples", NULL},
 	/* Special stuff */
 	{SR_CONF_SESSIONFILE, SR_T_STRING, "sessionfile",
 		"Session file", NULL},
